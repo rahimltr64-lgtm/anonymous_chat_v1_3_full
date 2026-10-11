@@ -20,3 +20,7 @@
 - الكود مُعاد بناؤه من ملف APK (كود Dart مترجَم ولا يمكن استخراجه حرفيًا)، لذلك الشاشات والميزات مطابقة لما في التطبيق لكن الكود نفسه جديد.
 - بنية Firestore المستخدمة: `rooms/{CODE}` بحقول `code, name, creatorId, createdAt` وداخلها `messages` بحقول `text, senderId, createdAt`. إن اختلفت أسماء الحقول في بياناتك القديمة فعدّلها في `lib/services.dart` و`lib/chat_screen.dart`.
 - لم أستطع تشغيل `flutter build` هنا، فجرّب البناء في Klencode وأرسل لي أي خطأ يظهر.
+
+## إرسال الصور والفيديوهات
+يستخدم التطبيق Cloudinary (مجاني وبدون بطاقة). عدّل الثابتين `kCloudinaryCloudName` و `kCloudinaryUploadPreset` في `lib/media.dart`.
+الحدود: صورة 10MB، فيديو 40MB.
