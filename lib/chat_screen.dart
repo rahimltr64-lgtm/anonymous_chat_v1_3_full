@@ -1,13 +1,19 @@
+import 'dart:io';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 
+import 'media.dart';
 import 'services.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
 typedef _Doc = QueryDocumentSnapshot<Map<String, dynamic>>;
+
+enum _Pick { galleryImage, galleryVideo, cameraImage, cameraVideo }
 
 class ChatScreen extends StatefulWidget {
   final String code;
@@ -25,6 +31,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _recorded = false;
   bool _missingHandled = false;
   bool _trimming = false;
+  bool _uploading = false;
 
   DocumentReference<Map<String, dynamic>> get _roomRef =>
       roomsRef().doc(widget.code);
@@ -79,6 +86,113 @@ class _ChatScreenState extends State<ChatScreen> {
         _ctrl.text = text;
         _snack('تعذّر إرسال الرسالة');
       }
+    }
+  }
+
+  void _attachSheet() {
+    if (_uploading) return;
+    final p = Pal.of(context);
+    Widget tile(IconData icon, String label, _Pick pick) => ListTile(
+          leading: Icon(icon, color: Pal.accent),
+          title: Text(label, style: TextStyle(color: p.text)),
+          onTap: () {
+            Navigator.of(context).pop();
+            _pickAndSend(pick);
+          },
+        );
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: p.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: p.border,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            tile(Icons.photo_library_rounded, 'صورة من المعرض',
+                _Pick.galleryImage),
+            tile(Icons.video_library_rounded, 'فيديو من المعرض',
+                _Pick.galleryVideo),
+            tile(Icons.photo_camera_rounded, 'التقاط صورة', _Pick.cameraImage),
+            tile(Icons.videocam_rounded, 'تسجيل فيديو', _Pick.cameraVideo),
+            const SizedBox(height: 6),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickAndSend(_Pick pick) async {
+    if (!mediaConfigured) {
+      _snack('لم يتم إعداد خدمة رفع الملفات بعد (media.dart)');
+      return;
+    }
+    final picker = ImagePicker();
+    XFile? x;
+    final isVideo = pick == _Pick.galleryVideo || pick == _Pick.cameraVideo;
+    try {
+      switch (pick) {
+        case _Pick.galleryImage:
+          x = await picker.pickImage(
+            source: ImageSource.gallery,
+            maxWidth: 1920,
+            maxHeight: 1920,
+            imageQuality: 82,
+          );
+        case _Pick.cameraImage:
+          x = await picker.pickImage(
+            source: ImageSource.camera,
+            maxWidth: 1920,
+            maxHeight: 1920,
+            imageQuality: 82,
+          );
+        case _Pick.galleryVideo:
+          x = await picker.pickVideo(source: ImageSource.gallery);
+        case _Pick.cameraVideo:
+          x = await picker.pickVideo(
+            source: ImageSource.camera,
+            maxDuration: const Duration(minutes: 1),
+          );
+      }
+    } catch (_) {
+      _snack('تعذّر فتح المعرض أو الكاميرا');
+      return;
+    }
+    if (x == null) return;
+    await _sendMedia(File(x.path), isVideo);
+  }
+
+  Future<void> _sendMedia(File file, bool isVideo) async {
+    if (!mounted) return;
+    setState(() => _uploading = true);
+    try {
+      final user = await ensureUser();
+      final m = await uploadMedia(file, isVideo: isVideo);
+      await _msgsRef.add({
+        'type': isVideo ? 'video' : 'image',
+        'mediaUrl': m.url,
+        'mediaW': m.width,
+        'mediaH': m.height,
+        'text': '',
+        'senderId': user.uid,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } on MediaException catch (e) {
+      _snack(e.message);
+    } catch (_) {
+      _snack('تعذّر إرسال الملف، تحقق من الاتصال');
+    } finally {
+      if (mounted) setState(() => _uploading = false);
     }
   }
 
@@ -164,15 +278,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 borderRadius: BorderRadius.circular(4),
               ),
             ),
-            ListTile(
-              leading: Icon(Icons.copy_rounded, color: p.text),
-              title: Text('نسخ', style: TextStyle(color: p.text)),
-              onTap: () async {
-                Navigator.of(ctx).pop();
-                await Clipboard.setData(ClipboardData(text: text));
-                _snack('تم النسخ');
-              },
-            ),
+            if (text.isNotEmpty)
+              ListTile(
+                leading: Icon(Icons.copy_rounded, color: p.text),
+                title: Text('نسخ', style: TextStyle(color: p.text)),
+                onTap: () async {
+                  Navigator.of(ctx).pop();
+                  await Clipboard.setData(ClipboardData(text: text));
+                  _snack('تم النسخ');
+                },
+              ),
             if (canDelete)
               ListTile(
                 leading: const Icon(Icons.delete_outline_rounded,
@@ -388,6 +503,10 @@ class _ChatScreenState extends State<ChatScreen> {
             final m = d.data();
             final sender = (m['senderId'] as String?) ?? '';
             final text = (m['text'] as String?) ?? '';
+            final type = (m['type'] as String?) ?? 'text';
+            final mediaUrl = (m['mediaUrl'] as String?) ?? '';
+            final mediaW = (m['mediaW'] as num?)?.toInt();
+            final mediaH = (m['mediaH'] as num?)?.toInt();
             final ts = (m['createdAt'] as Timestamp?)?.toDate();
             final mine = _uid != null && sender == _uid;
             final olderSender = i + 1 < list.length
@@ -396,6 +515,10 @@ class _ChatScreenState extends State<ChatScreen> {
             final sameAsOlder = olderSender == sender;
             return _MessageBubble(
               text: text,
+              mediaType: mediaUrl.isEmpty ? 'text' : type,
+              mediaUrl: mediaUrl,
+              mediaW: mediaW,
+              mediaH: mediaH,
               mine: mine,
               alias: aliasFor(sender),
               time: ts,
@@ -419,9 +542,34 @@ class _ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       child: SafeArea(
         top: false,
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_uploading) ...[
+              Row(
+                children: [
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 10),
+                  Text('جارٍ رفع الملف...',
+                      style: TextStyle(color: p.textDim, fontSize: 13)),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+            Row(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
+            IconButton(
+              tooltip: 'إرفاق صورة أو فيديو',
+              onPressed: _uploading ? null : _attachSheet,
+              icon: const Icon(Icons.add_photo_alternate_rounded),
+              color: Pal.accent,
+              iconSize: 28,
+            ),
             Expanded(
               child: TextField(
                 controller: _ctrl,
@@ -457,6 +605,8 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
+          ],
+        ),
       ),
     );
   }
@@ -464,6 +614,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
 class _MessageBubble extends StatelessWidget {
   final String text;
+  final String mediaType;
+  final String mediaUrl;
+  final int? mediaW;
+  final int? mediaH;
   final bool mine;
   final Alias alias;
   final DateTime? time;
@@ -473,6 +627,10 @@ class _MessageBubble extends StatelessWidget {
 
   const _MessageBubble({
     required this.text,
+    required this.mediaType,
+    required this.mediaUrl,
+    required this.mediaW,
+    required this.mediaH,
     required this.mine,
     required this.alias,
     required this.time,
@@ -530,14 +688,23 @@ class _MessageBubble extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                   ],
-                  Text(
-                    text,
-                    style: TextStyle(
-                      color: mine ? Colors.white : p.text,
-                      fontSize: 15.5,
-                      height: 1.45,
+                  if (mediaType == 'image' || mediaType == 'video')
+                    MediaMessage(
+                      isVideo: mediaType == 'video',
+                      url: mediaUrl,
+                      width: mediaW,
+                      height: mediaH,
+                      maxWidth: maxW - 28,
+                    )
+                  else
+                    Text(
+                      text,
+                      style: TextStyle(
+                        color: mine ? Colors.white : p.text,
+                        fontSize: 15.5,
+                        height: 1.45,
+                      ),
                     ),
-                  ),
                   if (time != null) ...[
                     const SizedBox(height: 3),
                     Align(
