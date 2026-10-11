@@ -15,6 +15,8 @@ typedef _Doc = QueryDocumentSnapshot<Map<String, dynamic>>;
 
 enum _Pick { galleryImage, galleryVideo, cameraImage, cameraVideo }
 
+const List<String> kReactionEmojis = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
 class ChatScreen extends StatefulWidget {
   final String code;
   const ChatScreen({super.key, required this.code});
@@ -32,6 +34,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _missingHandled = false;
   bool _trimming = false;
   bool _uploading = false;
+  Map<String, dynamic>? _replyTo;
 
   DocumentReference<Map<String, dynamic>> get _roomRef =>
       roomsRef().doc(widget.code);
@@ -73,17 +76,21 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _ctrl.text.trim();
     if (text.isEmpty) return;
+    final reply = _replyTo;
     _ctrl.clear();
+    setState(() => _replyTo = null);
     try {
       final user = await ensureUser();
       await _msgsRef.add({
         'text': text,
         'senderId': user.uid,
+        if (reply != null) 'replyTo': reply,
         'createdAt': FieldValue.serverTimestamp(),
       });
     } catch (_) {
       if (mounted) {
         _ctrl.text = text;
+        setState(() => _replyTo = reply);
         _snack('تعذّر إرسال الرسالة');
       }
     }
@@ -175,6 +182,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendMedia(File file, bool isVideo) async {
     if (!mounted) return;
     setState(() => _uploading = true);
+    final reply = _replyTo;
     try {
       final user = await ensureUser();
       final m = await uploadMedia(file, isVideo: isVideo);
@@ -185,8 +193,10 @@ class _ChatScreenState extends State<ChatScreen> {
         'mediaH': m.height,
         'text': '',
         'senderId': user.uid,
+        if (reply != null) 'replyTo': reply,
         'createdAt': FieldValue.serverTimestamp(),
       });
+      if (mounted) setState(() => _replyTo = null);
     } on MediaException catch (e) {
       _snack(e.message);
     } catch (_) {
@@ -194,6 +204,87 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       if (mounted) setState(() => _uploading = false);
     }
+  }
+
+  void _startReply(_Doc d) {
+    final m = d.data();
+    final type = (m['type'] as String?) ?? 'text';
+    var text = ((m['text'] as String?) ?? '').trim();
+    if (text.length > 100) text = '${text.substring(0, 100)}…';
+    setState(() {
+      _replyTo = {
+        'id': d.id,
+        'senderId': (m['senderId'] as String?) ?? '',
+        'type': (type == 'image' || type == 'video') ? type : 'text',
+        'text': text,
+      };
+    });
+  }
+
+  Future<void> _react(_Doc d, String emoji) async {
+    final uid = _uid;
+    if (uid == null) return;
+    final reactions = d.data()['reactions'];
+    final cur = reactions is Map ? reactions[uid] : null;
+    try {
+      await d.reference.update({
+        'reactions.$uid': cur == emoji ? FieldValue.delete() : emoji,
+      });
+    } catch (_) {
+      _snack('تعذّر إضافة التفاعل');
+    }
+  }
+
+  Widget _replyBar(Pal p) {
+    final r = _replyTo!;
+    final alias = aliasFor((r['senderId'] as String?) ?? '');
+    final type = r['type'];
+    final snippet = type == 'image'
+        ? '📷 صورة'
+        : type == 'video'
+            ? '🎥 فيديو'
+            : ((r['text'] as String?) ?? '');
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(10, 6, 4, 6),
+      decoration: BoxDecoration(
+        color: p.surfaceHigh,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.reply_rounded, size: 20, color: Pal.accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${alias.emoji} ${alias.name}',
+                  style: TextStyle(
+                    color: alias.color,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                Text(
+                  snippet,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: p.textDim, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: Icon(Icons.close_rounded, size: 20, color: p.textDim),
+            onPressed: () => setState(() => _replyTo = null),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _leave() async {
@@ -259,6 +350,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void _messageActions(_Doc d, bool canDelete) {
     final p = Pal.of(context);
     final text = (d.data()['text'] as String?) ?? '';
+    final rx = d.data()['reactions'];
+    final myReaction = rx is Map && _uid != null ? rx[_uid] : null;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: p.surface,
@@ -277,6 +370,39 @@ class _ChatScreenState extends State<ChatScreen> {
                 color: p.border,
                 borderRadius: BorderRadius.circular(4),
               ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final e in kReactionEmojis)
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.of(ctx).pop();
+                        _react(d, e);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: myReaction == e
+                              ? p.surfaceHigh
+                              : Colors.transparent,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Text(e, style: const TextStyle(fontSize: 26)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: Icon(Icons.reply_rounded, color: p.text),
+              title: Text('رد', style: TextStyle(color: p.text)),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _startReply(d);
+              },
             ),
             if (text.isNotEmpty)
               ListTile(
@@ -507,6 +633,15 @@ class _ChatScreenState extends State<ChatScreen> {
             final mediaUrl = (m['mediaUrl'] as String?) ?? '';
             final mediaW = (m['mediaW'] as num?)?.toInt();
             final mediaH = (m['mediaH'] as num?)?.toInt();
+            final reply = m['replyTo'] is Map
+                ? Map<String, dynamic>.from(m['replyTo'] as Map)
+                : null;
+            final reactions = <String, String>{};
+            if (m['reactions'] is Map) {
+              (m['reactions'] as Map).forEach((k, v) {
+                if (k is String && v is String) reactions[k] = v;
+              });
+            }
             final ts = (m['createdAt'] as Timestamp?)?.toDate();
             final mine = _uid != null && sender == _uid;
             final olderSender = i + 1 < list.length
@@ -519,6 +654,10 @@ class _ChatScreenState extends State<ChatScreen> {
               mediaUrl: mediaUrl,
               mediaW: mediaW,
               mediaH: mediaH,
+              reply: reply,
+              reactions: reactions,
+              myUid: _uid,
+              onReact: (e) => _react(d, e),
               mine: mine,
               alias: aliasFor(sender),
               time: ts,
@@ -545,6 +684,7 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_replyTo != null) _replyBar(p),
             if (_uploading) ...[
               Row(
                 children: [
@@ -618,6 +758,10 @@ class _MessageBubble extends StatelessWidget {
   final String mediaUrl;
   final int? mediaW;
   final int? mediaH;
+  final Map<String, dynamic>? reply;
+  final Map<String, String> reactions;
+  final String? myUid;
+  final void Function(String) onReact;
   final bool mine;
   final Alias alias;
   final DateTime? time;
@@ -631,6 +775,10 @@ class _MessageBubble extends StatelessWidget {
     required this.mediaUrl,
     required this.mediaW,
     required this.mediaH,
+    required this.reply,
+    required this.reactions,
+    required this.myUid,
+    required this.onReact,
     required this.mine,
     required this.alias,
     required this.time,
@@ -688,6 +836,7 @@ class _MessageBubble extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                   ],
+                  if (reply != null) _ReplyCard(reply: reply!, mine: mine),
                   if (mediaType == 'image' || mediaType == 'video')
                     MediaMessage(
                       isVideo: mediaType == 'video',
@@ -705,6 +854,15 @@ class _MessageBubble extends StatelessWidget {
                         height: 1.45,
                       ),
                     ),
+                  if (reactions.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    _ReactionChips(
+                      reactions: reactions,
+                      myUid: myUid,
+                      mine: mine,
+                      onReact: onReact,
+                    ),
+                  ],
                   if (time != null) ...[
                     const SizedBox(height: 3),
                     Align(
@@ -724,6 +882,123 @@ class _MessageBubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _ReplyCard extends StatelessWidget {
+  final Map<String, dynamic> reply;
+  final bool mine;
+  const _ReplyCard({required this.reply, required this.mine});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Pal.of(context);
+    final alias = aliasFor((reply['senderId'] as String?) ?? '');
+    final type = reply['type'];
+    final snippet = type == 'image'
+        ? '📷 صورة'
+        : type == 'video'
+            ? '🎥 فيديو'
+            : ((reply['text'] as String?) ?? '');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          color: mine ? const Color(0x26FFFFFF) : p.surfaceHigh,
+          child: IntrinsicHeight(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(width: 3, color: alias.color),
+                Flexible(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 5, 8, 5),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '${alias.emoji} ${alias.name}',
+                          style: TextStyle(
+                            color: mine ? Colors.white : alias.color,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          snippet,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: mine ? const Color(0xE6FFFFFF) : p.textDim,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ReactionChips extends StatelessWidget {
+  final Map<String, String> reactions;
+  final String? myUid;
+  final bool mine;
+  final void Function(String) onReact;
+  const _ReactionChips({
+    required this.reactions,
+    required this.myUid,
+    required this.mine,
+    required this.onReact,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Pal.of(context);
+    final counts = <String, int>{};
+    for (final e in reactions.values) {
+      counts[e] = (counts[e] ?? 0) + 1;
+    }
+    final entries = counts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final myEmoji = myUid == null ? null : reactions[myUid];
+    return Wrap(
+      spacing: 4,
+      runSpacing: 4,
+      children: [
+        for (final e in entries)
+          GestureDetector(
+            onTap: () => onReact(e.key),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: mine ? const Color(0x33FFFFFF) : p.surfaceHigh,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: myEmoji == e.key ? Pal.accent : Colors.transparent,
+                  width: 1.2,
+                ),
+              ),
+              child: Text(
+                e.value > 1 ? '${e.key} ${e.value}' : e.key,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: mine ? Colors.white : p.text,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
